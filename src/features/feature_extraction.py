@@ -9,7 +9,7 @@ SAMPLE_RATE = 22050
 N_MFCC = 13
 
 def extract_features(audio_path):
-    """Extract MFCC, pitch, energy, spectral features, tempo"""
+    """Extract MFCC, pitch, energy, spectral features, tempo and return as DataFrame"""
     try:
         y, sr = librosa.load(audio_path, sr=SAMPLE_RATE)
 
@@ -39,6 +39,7 @@ def extract_features(audio_path):
         onset_env = librosa.onset.onset_strength(y=y, sr=sr)
         tempo, _ = librosa.beat.beat_track(onset_envelope=onset_env, sr=sr)
 
+        # Combine all features into one row
         features = np.hstack([
             mfcc_mean, mfcc_std,
             pitch_mean, pitch_std,
@@ -47,19 +48,35 @@ def extract_features(audio_path):
             bandwidth_mean, bandwidth_std,
             tempo, 0  # tempo_std placeholder
         ])
-        return features
+
+        columns = (
+            [f"mfcc_{i+1}_mean" for i in range(N_MFCC)] +
+            [f"mfcc_{i+1}_std" for i in range(N_MFCC)] +
+            ["pitch_mean", "pitch_std",
+             "energy_mean", "energy_std",
+             "centroid_mean", "centroid_std",
+             "bandwidth_mean", "bandwidth_std",
+             "tempo_mean", "tempo_std"]
+        )
+
+        # Return as single-row DataFrame
+        df = pd.DataFrame([features], columns=columns)
+        return df
+
     except Exception as e:
         print(f"Error processing {audio_path}: {e}")
         return None
+
 
 def extract_features_from_folder(wave_dir: Path, output_csv: Path):
     """Extract features for all WAV files in a folder"""
     data = []
     for audio_file in wave_dir.rglob("*.wav"):
         print(f"Processing {audio_file}...")
-        features = extract_features(audio_file)
-        if features is not None:
-            data.append([str(audio_file)] + list(features))
+        df = extract_features(audio_file)
+        if df is not None and not df.empty:
+            row = [str(audio_file)] + list(df.iloc[0])
+            data.append(row)
 
     # Define columns
     columns = (
@@ -73,14 +90,14 @@ def extract_features_from_folder(wave_dir: Path, output_csv: Path):
          "tempo_mean", "tempo_std"]
     )
 
-    df = pd.DataFrame(data, columns=columns)
-    # Add utt_id column
-    df["utt_id"] = df["file_path"].apply(lambda x: Path(x).stem)
+    df_all = pd.DataFrame(data, columns=columns)
+    df_all["utt_id"] = df_all["file_path"].apply(lambda x: Path(x).stem)
 
     output_csv.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(output_csv, index=False)
+    df_all.to_csv(output_csv, index=False)
     print(f"✅ Saved features CSV to {output_csv}")
-    return df
+    return df_all
+
 
 if __name__ == "__main__":
     project_root = Path(__file__).resolve().parent.parent.parent
