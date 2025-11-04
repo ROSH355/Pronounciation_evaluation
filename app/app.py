@@ -67,37 +67,43 @@ def extract_features(audio_path):
     return pd.DataFrame([features], columns=feature_names)
 
 
-def align_features_to_model(X, model):
-    """Ensure input features match training features."""
+def align_features_to_model(X, model_feature_names=None):
+    """Ensure input features match training features.
+       If model_feature_names provided, use those; otherwise fallback to model.feature_names_in_ usage.
+    """
     if X is None or X.empty:
         return pd.DataFrame(np.zeros((1, 1)), columns=["placeholder"])  # fallback
 
-    if not hasattr(model, "feature_names_in_"):
-        return X  # for older sklearn versions
+    if model_feature_names is None:
+        return X  # caller will try model.feature_names_in_ if needed
 
-    model_feats = list(model.feature_names_in_)
+    # Ensure all expected features exist; fill missing with 0.0 and drop extras
     X_aligned = pd.DataFrame(index=X.index)
-
-    # Copy or fill missing features
-    for f in model_feats:
+    for f in model_feature_names:
         X_aligned[f] = X[f] if f in X.columns else 0.0
 
-    # Handle invalids
-    X_aligned = X_aligned.replace([np.nan, np.inf, -np.inf], 0)
-
-    # Ensure at least one sample row
+    X_aligned = X_aligned.replace([np.nan, np.inf, -np.inf], 0.0)
     if X_aligned.shape[0] == 0:
-        X_aligned.loc[0] = [0.0] * len(model_feats)
-
+        X_aligned.loc[0] = [0.0] * len(model_feature_names)
     return X_aligned
 
 
 def load_models():
-    """Loads trained models from the models/ directory."""
+    """Loads trained models (payload dicts) from the models/ directory."""
     models = {}
     for pkl_file in MODELS_DIR.glob("*.pkl"):
         try:
-            models[pkl_file.stem] = joblib.load(pkl_file)
+            loaded = joblib.load(pkl_file)
+            # Accept two forms:
+            # - a dict payload {"model": ..., "feature_names": [...]}
+            # - a raw sklearn estimator
+            if isinstance(loaded, dict) and "model" in loaded:
+                models[pkl_file.stem] = {
+                    "model": loaded["model"],
+                    "feature_names": loaded.get("feature_names")
+                }
+            else:
+                models[pkl_file.stem] = {"model": loaded, "feature_names": getattr(loaded, "feature_names_in_", None)}
         except Exception as e:
             st.error(f"⚠ Failed to load {pkl_file.name}: {e}")
     return models
@@ -178,18 +184,20 @@ if page == "🎧 Predict Score":
             st.subheader("🤖 Predictions from Trained Models")
             preds = {}
 
-            for name, model in models.items():
+            for name, entry in models.items():
                 try:
+                    model_obj = entry["model"]
+                    feat_names = entry.get("feature_names")
                     # Align current features with model’s training features
-                    X_aligned = align_features_to_model(X, model)
+                    X_aligned = align_features_to_model(X, model_feature_names=feat_names)
 
                     # Add constant feature if model expects it
-                    if "const_feature" in getattr(model, "feature_names_in_", []):
+                    if feat_names and "const_feature" in feat_names:
                         if "const_feature" not in X_aligned.columns:
                             X_aligned["const_feature"] = 1.0
 
                     # Predict
-                    preds[name] = float(model.predict(X_aligned)[0])
+                    preds[name] = float(model_obj.predict(X_aligned)[0])
 
                 except Exception as e:
                     preds[name] = None

@@ -232,16 +232,26 @@ def train_models(X_train, y_train):
         "svm": SVR()
     }
 
+    fitted = {}
     for name, model in models.items():
-        print(f"Training {name}...")
+        # fit model
         model.fit(X_train, y_train)
-        print(f"✅ {name} trained")
-    return models
+        fitted[name] = model
+    return fitted
 
-def save_models(models, models_dir: Path):
+def save_models(models, models_dir: Path, feature_names=None):
     models_dir.mkdir(parents=True, exist_ok=True)
     for name, model in models.items():
-        joblib.dump(model, models_dir / f"{name}.pkl")
+        # save dict with model and feature names so runtime can align features
+        payload = {"model": model}
+        if feature_names is not None:
+            payload["feature_names"] = list(feature_names)
+        else:
+            # prefer sklearn's feature_names_in_ when available
+            fn = getattr(model, "feature_names_in_", None)
+            if fn is not None:
+                payload["feature_names"] = list(fn)
+        joblib.dump(payload, models_dir / f"{name}.pkl")
         print(f"Saved {name} to {models_dir / f'{name}.pkl'}")
 
 if __name__ == "__main__":
@@ -255,6 +265,4 @@ if __name__ == "__main__":
 
     # Train models
     models = train_models(X_train, y_train)
-
-    # Save trained models
-    save_models(models, models_dir)
+    save_models(models, models_dir, feature_names=X_train.columns)
