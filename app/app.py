@@ -1,79 +1,70 @@
 import streamlit as st
+import librosa
 import numpy as np
 import pandas as pd
-import librosa
 import joblib
+import json
 from pathlib import Path
 import matplotlib.pyplot as plt
+from streamlit_mic_recorder import mic_recorder
+import speech_recognition as sr
 
-# =============== CONFIG ===============
-st.set_page_config(page_title="Pronunciation Evaluation", page_icon="🎙️", layout="centered")
-SAMPLE_RATE = 22050
-N_MFCC = 13
+# ---------------------------------------------------------
+# Paths
+# ---------------------------------------------------------
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+MODELS_DIR = PROJECT_ROOT / "models"
+METRICS_PATH = MODELS_DIR / "metrics.json"
 
-# =============== UTILS ===============
+# ---------------------------------------------------------
+# Helper functions
+# ---------------------------------------------------------
 def extract_features(audio_path):
-    """Extract MFCC, pitch, energy, spectral features, tempo"""
-    try:
-        y, sr = librosa.load(audio_path, sr=SAMPLE_RATE)
+    """Extracts MFCC, pitch, energy, spectral, and tempo features."""
+    y, sr = librosa.load(audio_path, sr=None)
+    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
+    mfcc_means = np.mean(mfcc, axis=1)
+    mfcc_stds = np.std(mfcc, axis=1)
 
-        # MFCC
-        mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=N_MFCC)
-        mfcc_mean = np.mean(mfccs, axis=1)
-        mfcc_std = np.std(mfccs, axis=1)
+    pitch, _ = librosa.piptrack(y=y, sr=sr)
+    pitches = pitch[pitch > 0]
+    pitch_mean = np.mean(pitches) if len(pitches) > 0 else 0
+    pitch_std = np.std(pitches) if len(pitches) > 0 else 0
 
-        # Pitch
-        f0, _, _ = librosa.pyin(y, fmin=librosa.note_to_hz('C1'),
-                                fmax=librosa.note_to_hz('C8'))
-        pitch_mean = np.nanmean(f0)
-        pitch_std = np.nanstd(f0)
+    energy = librosa.feature.rms(y=y)[0]
+    energy_mean = np.mean(energy)
+    energy_std = np.std(energy)
 
-        # Energy
-        rms = librosa.feature.rms(y=y)
-        energy_mean = np.mean(rms)
-        energy_std = np.std(rms)
+    centroid = librosa.feature.spectral_centroid(y=y, sr=sr)[0]
+    centroid_mean = np.mean(centroid)
+    centroid_std = np.std(centroid)
 
-        # Spectral
-        centroid = librosa.feature.spectral_centroid(y=y, sr=sr)
-        bandwidth = librosa.feature.spectral_bandwidth(y=y, sr=sr)
-        centroid_mean, centroid_std = np.mean(centroid), np.std(centroid)
-        bandwidth_mean, bandwidth_std = np.mean(bandwidth), np.std(bandwidth)
+    bandwidth = librosa.feature.spectral_bandwidth(y=y, sr=sr)[0]
+    bandwidth_mean = np.mean(bandwidth)
+    bandwidth_std = np.std(bandwidth)
 
-        # Tempo
-        onset_env = librosa.onset.onset_strength(y=y, sr=sr)
-        tempo, _ = librosa.beat.beat_track(onset_envelope=onset_env, sr=sr)
+    tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
+    tempo_mean = np.mean(tempo)
+    tempo_std = np.std(tempo)
 
-        # Create DataFrame row
-        features = np.hstack([
-            mfcc_mean, mfcc_std,
-            pitch_mean, pitch_std,
-            energy_mean, energy_std,
-            centroid_mean, centroid_std,
-            bandwidth_mean, bandwidth_std,
-            tempo, 0  # tempo_std placeholder
-        ])
+    features = np.concatenate([
+        mfcc_means, mfcc_stds,
+        [pitch_mean, pitch_std,
+         energy_mean, energy_std,
+         centroid_mean, centroid_std,
+         bandwidth_mean, bandwidth_std,
+         tempo_mean, tempo_std]
+    ])
 
-        columns = (
-            [f"mfcc_{i+1}_mean" for i in range(N_MFCC)] +
-            [f"mfcc_{i+1}_std" for i in range(N_MFCC)] +
-            ["pitch_mean", "pitch_std",
-             "energy_mean", "energy_std",
-             "centroid_mean", "centroid_std",
-             "bandwidth_mean", "bandwidth_std",
-             "tempo_mean", "tempo_std"]
-        )
-        return pd.DataFrame([features], columns=columns)
-    except Exception as e:
-        st.error(f"Error extracting features: {e}")
-        return None
+    feature_names = (
+        [f"mfcc_{i+1}_mean" for i in range(13)] +
+        [f"mfcc_{i+1}_std" for i in range(13)] +
+        ["pitch_mean", "pitch_std", "energy_mean", "energy_std",
+         "centroid_mean", "centroid_std", "bandwidth_mean", "bandwidth_std",
+         "tempo_mean", "tempo_std"]
+    )
 
-
-def safe_load_model(path):
-    try:
-        return joblib.load(path)
-    except Exception as e:
-        st.warning(f"⚠️ Could not load {path.name}: {e}")
-        return None
+    return pd.DataFrame([features], columns=feature_names)
 
 
 def align_features_to_model(X, model):
@@ -101,70 +92,134 @@ def align_features_to_model(X, model):
     return X_aligned
 
 
+def load_models():
+    """Loads trained models from the models/ directory."""
+    models = {}
+    for pkl_file in MODELS_DIR.glob("*.pkl"):
+        try:
+            models[pkl_file.stem] = joblib.load(pkl_file)
+        except Exception as e:
+            st.error(f"⚠ Failed to load {pkl_file.name}: {e}")
+    return models
 
-# =============== STREAMLIT APP ===============
-st.title("🎙️ Pronunciation Evaluation System")
-st.write("Upload or record your pronunciation audio, and get model-based evaluation scores.")
 
-uploaded_file = st.file_uploader("Upload a WAV file", type=["wav"])
+def plot_metrics(metrics_dict):
+    """Display model evaluation metrics as bar chart."""
+    df = pd.DataFrame(metrics_dict).T
+    st.subheader("📊 Model Evaluation Metrics")
+    st.bar_chart(df)
 
-if uploaded_file:
-    st.audio(uploaded_file, format="audio/wav")
 
-    # Save temporary file
-    temp_path = Path("temp.wav")
-    with open(temp_path, "wb") as f:
-        f.write(uploaded_file.getbuffer())
-
-    # Speech recognition (optional)
-    import speech_recognition as sr
-    r = sr.Recognizer()
-    with sr.AudioFile(str(temp_path)) as source:
-        audio_data = r.record(source)
+def transcribe_audio(audio_path):
+    """Transcribe audio using SpeechRecognition (Google API)."""
+    recognizer = sr.Recognizer()
+    with sr.AudioFile(str(audio_path)) as source:
+        audio = recognizer.record(source)
     try:
-        text = r.recognize_google(audio_data)
-        st.write("🗒️ Recognized Speech:")
-        st.success(text)
-    except Exception as e:
-        st.warning(f"Speech recognition failed: {e}")
-        text = ""
+        text = recognizer.recognize_google(audio)
+        return text
+    except sr.UnknownValueError:
+        return "⚠ Could not understand the audio clearly."
+    except sr.RequestError:
+        return "⚠ Speech recognition service unavailable."
 
-    # Feature extraction
-    X_new = extract_features(temp_path)
-    if X_new is not None:
-        st.success("✅ Features extracted successfully!")
+# ---------------------------------------------------------
+# Streamlit UI
+# ---------------------------------------------------------
+st.set_page_config(page_title="Pronunciation Evaluation", layout="wide")
+st.title("🗣 Pronunciation Evaluation Dashboard")
 
-        models_dir = Path(__file__).resolve().parent.parent / "models"
-        models = {
-            "linear_regression": safe_load_model(models_dir / "linear_regression.pkl"),
-            "random_forest": safe_load_model(models_dir / "random_forest.pkl"),
-            "svm": safe_load_model(models_dir / "svm.pkl")
-        }
+st.sidebar.header("Navigation")
+page = st.sidebar.radio("Go to", ["🎧 Predict Score", "📈 View Model Metrics"])
 
-        results = []
-        for name, model in models.items():
-            if model is None:
-                continue
+# ---------------------------------------------------------
+# Page 1 — Prediction (Upload + Live Recording)
+# ---------------------------------------------------------
+if page == "🎧 Predict Score":
+    st.subheader("🎙 Evaluate Your Pronunciation")
 
-            try:
-                X_aligned = align_features_to_model(X_new, model)
-                pred = model.predict(X_aligned)[0]
-                results.append((name, pred))
-            except Exception as e:
-                st.warning(f"⚠️ Error predicting with {name}: {e}")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("#### 🎧 Upload a .wav file")
+        uploaded_file = st.file_uploader("Upload an audio file", type=["wav"])
 
-        if results:
-            pred_df = pd.DataFrame(results, columns=["Model", "Predicted Score"])
-            st.write("🤖 Predictions from Trained Models")
-            st.dataframe(pred_df, hide_index=True)
+    with col2:
+        st.markdown("#### 🎤 Record your voice (real-time)")
+        audio_bytes = mic_recorder(start_prompt="🎙 Start recording", stop_prompt="⏹ Stop recording", just_once=True)
 
-            # Plot
-            fig, ax = plt.subplots()
-            ax.bar(pred_df["Model"], pred_df["Predicted Score"], color="lightcoral")
-            ax.set_ylabel("Predicted Score")
-            ax.set_title("Model Predictions")
-            st.pyplot(fig)
+    audio_data = None
+    if uploaded_file is not None:
+        st.info("Using uploaded file")
+        audio_data = uploaded_file.read()
+    elif audio_bytes is not None:
+        st.info("Using recorded audio")
+        audio_data = audio_bytes
+
+    if audio_data:
+        tmp_path = Path("temp_audio.wav")
+        with open(tmp_path, "wb") as f:
+            f.write(audio_data)
+
+        st.audio(str(tmp_path))
+
+        with st.spinner("Transcribing audio..."):
+            transcript = transcribe_audio(tmp_path)
+            st.markdown("🗒 Recognized Speech:")
+            st.write(transcript)
+
+        with st.spinner("Extracting features..."):
+            X = extract_features(tmp_path)
+            st.success("✅ Features extracted successfully!")
+
+        models = load_models()
+        if not models:
+            st.error("No trained models found in 'models/' directory.")
         else:
-            st.error("No predictions generated — all models failed.")
+            st.subheader("🤖 Predictions from Trained Models")
+            preds = {}
+
+            for name, model in models.items():
+                try:
+                    # Align current features with model’s training features
+                    X_aligned = align_features_to_model(X, model)
+
+                    # Add constant feature if model expects it
+                    if "const_feature" in getattr(model, "feature_names_in_", []):
+                        if "const_feature" not in X_aligned.columns:
+                            X_aligned["const_feature"] = 1.0
+
+                    # Predict
+                    preds[name] = float(model.predict(X_aligned)[0])
+
+                except Exception as e:
+                    preds[name] = None
+                    st.error(f"Error predicting with {name}: {e}")
+
+            # Create dataframe of successful predictions only
+            pred_df = pd.DataFrame(
+                [(m, s) for m, s in preds.items() if s is not None],
+                columns=["Model", "Predicted Score"]
+            )
+
+            if pred_df.empty:
+                st.warning("⚠ No valid predictions could be generated.")
+            else:
+                st.dataframe(pred_df)
+
+                fig, ax = plt.subplots()
+                ax.bar(pred_df["Model"], pred_df["Predicted Score"], color="lightcoral")
+                ax.set_ylabel("Predicted Pronunciation Score")
+                ax.set_ylim(0, 10)
+                st.pyplot(fig)
+
+# ---------------------------------------------------------
+# Page 2 — Metrics Visualization
+# ---------------------------------------------------------
+elif page == "📈 View Model Metrics":
+    st.subheader("📉 Model Evaluation Results")
+    if METRICS_PATH.exists():
+        with open(METRICS_PATH, "r", encoding="utf-8") as f:
+            metrics = json.load(f)
+        plot_metrics(metrics)
     else:
-        st.error("Feature extraction failed.")
+        st.error("No metrics.json found. Please run evaluate_model.py first.")
