@@ -112,8 +112,19 @@ def extract_features_from_folder(wave_dir: Path, output_csv: Path):
 
 
 if __name__ == "__main__":
+    import sys
     project_root = Path(__file__).resolve().parent.parent.parent
     processed_dir = project_root / "data/processed"
     wave_dir = project_root / "data/raw/WAVE"
 
-    extract_features_from_folder(wave_dir, processed_dir / "features_train.csv")
+    # Support for "train" or "test" mode
+    mode = "train"
+    if len(sys.argv) > 1 and sys.argv[1] == "--mode" and len(sys.argv) > 2:
+        mode = sys.argv[2]
+
+    if mode == "train":
+        output_csv = processed_dir / "features_train.csv"
+    else:
+        output_csv = processed_dir / "features_test.csv"
+
+    extract_features_from_folder(wave_dir, output_csv)
